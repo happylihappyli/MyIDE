@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>MyIDE.SmokeTest</RootNamespace>
+    <AssemblyName>MyIDE.SmokeTest</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 引用主项目的源文件（避免重复编译 DLL） -->
+    <Compile Include="..\Models\ChangeInstruction.cs" Link="Models\ChangeInstruction.cs" />
+    <Compile Include="..\Services\PromptGenerator.cs" Link="Services\PromptGenerator.cs" />
+    <Compile Include="..\Services\ChangeApplier.cs" Link="Services\ChangeApplier.cs" />
+    <Compile Include="..\Services\DiffEngine.cs" Link="Services\DiffEngine.cs" />
+    <Compile Include="..\Services\UndoStack.cs" Link="Services\UndoStack.cs" />
+  </ItemGroup>
+
+</Project>

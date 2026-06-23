@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../python/my_chrome"
+		}
+	],
+	"settings": {}
+}

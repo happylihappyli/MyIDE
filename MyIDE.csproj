@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>MyIDE</RootNamespace>
+  </PropertyGroup>
+
+  <!-- 排除 SmokeTest 目录，避免重复入口点 -->
+  <ItemGroup>
+    <Compile Remove="MyIDE.SmokeTest\**" />
+    <None Remove="MyIDE.SmokeTest\**" />
+  </ItemGroup>
+
+</Project>
