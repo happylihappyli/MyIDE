@@ -13,8 +13,17 @@ namespace MyIDE.Services;
 public class AppSettings
 {
     public List<string> RecentDirs { get; set; } = new();
+    public string LastPlanText { get; set; } = "";
+    public bool IncludePromptProtocolOnNextPrompt { get; set; } = true;
     public List<SavedAiCommand> SavedCommands { get; set; } = new();
     public List<SavedAiJson> SavedJsonHistory { get; set; } = new();
+    public int LeftPanelWidth { get; set; } = 280;
+    public int RightPanelWidth { get; set; } = 520;
+    public int AiJsonDialogSplitterDistance { get; set; } = 700;
+    public bool IsSavedJsonCollapsed { get; set; }
+    public bool IsSavedCommandsCollapsed { get; set; }
+    public bool IsLogCollapsed { get; set; }
+    public string DeletedFilesBackupPath { get; set; } = "";
 
     public static AppSettings Load()
     {

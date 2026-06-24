@@ -33,6 +33,13 @@ public class FileChange
     /// <summary>对该文件的一系列操作（按顺序执行）</summary>
     [JsonPropertyName("ops")]
     public List<LineOp> Ops { get; set; } = new();
+
+    /// <summary>AI 可能直接返回 unified diff 格式的代码（非协议内，但提供兼容处理）</summary>
+    [JsonPropertyName("diff")]
+    public string Diff { get; set; } = "";
+
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = "";
 }
 
 /// <summary>
@@ -59,6 +66,10 @@ public class LineOp
     /// <summary>新内容（多行用 \n）</summary>
     [JsonPropertyName("content")]
     public string Content { get; set; } = "";
+
+    /// <summary>原内容，用于 Diff 模式下的精准匹配</summary>
+    [JsonPropertyName("oldContent")]
+    public string? OldContent { get; set; }
 }
 
 /// <summary>
@@ -73,6 +84,10 @@ public class AiCommand
     /// <summary>命令用途说明</summary>
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = "";
+
+    /// <summary>AI 有时返回 description 而非 reason</summary>
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = "";
 
     /// <summary>命令文本本身</summary>
     [JsonPropertyName("command")]

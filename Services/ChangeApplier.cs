@@ -79,8 +79,112 @@ public class ChangeApplier
             ReadCommentHandling = JsonCommentHandling.Skip,
             AllowTrailingCommas = true,
         };
-        return JsonSerializer.Deserialize<ChangePlan>(text, options)
+        var plan = JsonSerializer.Deserialize<ChangePlan>(text, options)
             ?? throw new InvalidDataException("JSON 解析结果为空");
+            
+        PostProcessParsedPlan(plan);
+        return plan;
+    }
+
+    private void PostProcessParsedPlan(ChangePlan plan)
+    {
+        foreach (var cmd in plan.Commands)
+        {
+            if (string.IsNullOrWhiteSpace(cmd.Name) && !string.IsNullOrWhiteSpace(cmd.Description))
+                cmd.Name = cmd.Description;
+            if (string.IsNullOrWhiteSpace(cmd.Reason) && !string.IsNullOrWhiteSpace(cmd.Description))
+                cmd.Reason = cmd.Description;
+        }
+
+        foreach (var fc in plan.Changes)
+        {
+            if (fc.Ops.Count == 0 && !string.IsNullOrWhiteSpace(fc.Diff))
+            {
+                fc.Ops = ConvertDiffToOps(fc.Diff);
+            }
+        }
+    }
+
+    private List<LineOp> ConvertDiffToOps(string diff)
+    {
+        var ops = new List<LineOp>();
+        var lines = diff.Replace("\r\n", "\n").Split('\n');
+        
+        int i = 0;
+        while (i < lines.Length)
+        {
+            if (lines[i].StartsWith("@@ "))
+            {
+                var header = lines[i];
+                var parts = header.Split(' ');
+                if (parts.Length >= 3 && parts[1].StartsWith("-"))
+                {
+                    var oldRange = parts[1].Substring(1).Split(',');
+                    if (oldRange.Length >= 1 && int.TryParse(oldRange[0], out int startLine))
+                    {
+                        var newLines = new List<string>();
+                        var oldLines = new List<string>();
+                        int actualOldCount = 0;
+                        i++;
+                        
+                        // Unified diff 可能会在修改前有一两行没有前缀的上下文
+                        while (i < lines.Length && !lines[i].StartsWith("@@ ") && !lines[i].StartsWith("--- ") && !lines[i].StartsWith("+++ "))
+                        {
+                            var line = lines[i];
+                            if (line.StartsWith("+"))
+                            {
+                                newLines.Add(line.Substring(1));
+                            }
+                            else if (line.StartsWith("-"))
+                            {
+                                oldLines.Add(line.Substring(1));
+                                actualOldCount++;
+                            }
+                            else if (line.StartsWith(" "))
+                            {
+                                newLines.Add(line.Substring(1));
+                                oldLines.Add(line.Substring(1));
+                                actualOldCount++;
+                            }
+                            else if (line == "\\ No newline at end of file")
+                            {
+                                // 忽略
+                            }
+                            else if (string.IsNullOrWhiteSpace(line))
+                            {
+                                newLines.Add(""); // 空行作为上下文
+                                oldLines.Add("");
+                                actualOldCount++;
+                            }
+                            else
+                            {
+                                // 可能是非标准格式的上下文，保守当做原文件的一行
+                                newLines.Add(line);
+                                oldLines.Add(line);
+                                actualOldCount++;
+                            }
+                            i++;
+                        }
+                        
+                        // 如果计算出来的 actualOldCount 是 0（纯插入），避免 End < Start
+                        int safeEnd = startLine + Math.Max(0, actualOldCount) - 1;
+                        if (actualOldCount == 0) safeEnd = startLine - 1; // replace区间为空，相当于纯插入
+                        
+                        ops.Add(new LineOp
+                        {
+                            Type = "replace",
+                            Start = startLine,
+                            End = safeEnd,
+                            Content = string.Join("\n", newLines),
+                            OldContent = string.Join("\n", oldLines)
+                        });
+                        continue;
+                    }
+                }
+            }
+            i++;
+        }
+        return ops;
     }
 
     /// <summary>
@@ -236,16 +340,68 @@ public class ChangeApplier
             _ => start0,
         };
 
+    /// <summary>
+    /// 将 AI 返回的代码内容按真实换行拆分成行，同时保留源码里的转义字符文本。
+    /// </summary>
+    private static string[] SplitContentLines(string? content)
+    {
+        return (content ?? string.Empty)
+            .Replace("\r\n", "\n")
+            .Replace('\r', '\n')
+            .Split('\n');
+    }
+
     private ApplyResult ApplyOneOp(List<string> lines, LineOp op, int start0, int end0, int after0)
     {
         var type = (op.Type ?? "").ToLowerInvariant();
+        
+        // 如果有 OldContent，进行模糊搜索定位真实的 start0 和 end0
+        if (type == "replace" && op.OldContent != null && lines.Count > 0)
+        {
+            var oldBlock = SplitContentLines(op.OldContent);
+            if (oldBlock.Length > 0)
+            {
+                int bestMatchStart = -1;
+                // 搜索范围：以提供的 start0 为中心，上下浮动 50 行
+                int searchStart = Math.Max(0, start0 - 50);
+                int searchEnd = Math.Min(lines.Count - oldBlock.Length, start0 + 50);
+                
+                for (int i = searchStart; i <= searchEnd; i++)
+                {
+                    bool match = true;
+                    for (int j = 0; j < oldBlock.Length; j++)
+                    {
+                        if (lines[i + j].Trim() != oldBlock[j].Trim())
+                        {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match)
+                    {
+                        // 如果有多个匹配，优先选择最接近 start0 的
+                        if (bestMatchStart == -1 || Math.Abs(i - start0) < Math.Abs(bestMatchStart - start0))
+                        {
+                            bestMatchStart = i;
+                        }
+                    }
+                }
+                
+                if (bestMatchStart != -1)
+                {
+                    start0 = bestMatchStart;
+                    end0 = bestMatchStart + oldBlock.Length - 1;
+                }
+            }
+        }
+
         switch (type)
         {
             case "replace":
                 // 彻底放宽：如果是新文件或者目标文件内容为空，且AI发来了 replace，全部当做无条件插入
                 if (lines.Count == 0)
                 {
-                    var newLinesEmpty = (op.Content ?? "").Replace("\\r\\n", "\n").Replace("\\n", "\n").Replace("\\t", "\t").Split('\n');
+                    var newLinesEmpty = SplitContentLines(op.Content);
                     lines.AddRange(newLinesEmpty);
                     return new ApplyResult { Success = true, Message = $"文件为空，直接作为新内容插入 {newLinesEmpty.Length} 行" };
                 }
@@ -254,7 +410,7 @@ public class ChangeApplier
                 // 这时候我们把原文件内容保留，直接把新内容追加到最后，避免因为行号对不上导致整个修改失败。
                 if (start0 >= lines.Count)
                 {
-                    var appendLines = (op.Content ?? "").Replace("\\r\\n", "\n").Replace("\\n", "\n").Replace("\\t", "\t").Split('\n');
+                    var appendLines = SplitContentLines(op.Content);
                     lines.AddRange(appendLines);
                     return new ApplyResult { Success = true, Message = $"行号超限({start0 + 1} > {lines.Count})，已作为追加处理" };
                 }
@@ -268,7 +424,7 @@ public class ChangeApplier
                 // 防止 end0 越界：如果要求替换到 100 行，但文件只有 5 行，那就把 1 到 5 行替换掉
                 int safeEnd0 = Math.Min(end0, lines.Count - 1);
                 
-                var newLines = (op.Content ?? "").Replace("\\r\\n", "\n").Replace("\\n", "\n").Replace("\\t", "\t").Split('\n');
+                var newLines = SplitContentLines(op.Content);
                 lines.RemoveRange(start0, safeEnd0 - start0 + 1);
                 lines.InsertRange(start0, newLines);
                 return new ApplyResult { Success = true, Message = $"第 {start0 + 1}-{safeEnd0 + 1} 行替换为 {newLines.Length} 行" };
@@ -282,7 +438,7 @@ public class ChangeApplier
             case "insert":
                 if (after0 < 0 || after0 > lines.Count)
                     return new ApplyResult { Success = false, Message = $"行号越界 insert after {after0}" };
-                var ins = (op.Content ?? "").Replace("\\r\\n", "\n").Replace("\\n", "\n").Replace("\\t", "\t").Split('\n');
+                var ins = SplitContentLines(op.Content);
                 lines.InsertRange(after0, ins);
                 return new ApplyResult { Success = true, Message = $"在第 {after0} 行后插入 {ins.Length} 行" };
 

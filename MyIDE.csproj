@@ -15,4 +15,8 @@
     <None Remove="MyIDE.SmokeTest\**" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Reference Include="Microsoft.VisualBasic" />
+  </ItemGroup>
+
 </Project>

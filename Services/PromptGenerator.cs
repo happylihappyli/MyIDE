@@ -11,6 +11,10 @@ namespace MyIDE.Services;
 /// </summary>
 public class PromptGenerator
 {
+    private const string FullJsonProtocolMarker = "【输出 JSON 规范】";
+    private const string BriefJsonProtocolLine1 = "继续沿用当前 Session 已约定的 JSON 协议，本次不要重复解释协议内容。";
+    private const string BriefJsonProtocolLine2 = "仍然只允许返回可直接解析的纯 JSON，并且必须包含 task、changes、commands 三个字段。";
+
     /// <summary>
     /// 生成完整提示词
     /// </summary>
@@ -18,15 +22,97 @@ public class PromptGenerator
     /// <param name="selectedFiles">用户选中的文件列表（相对路径）</param>
     /// <param name="userPlan">用户写的"我要做什么"</param>
     /// <param name="includeAllFiles">是否把所有文件内容都塞进去（文件很多时建议 false）</param>
-    public string Generate(string projectRoot, List<string> selectedFiles, string userPlan, bool includeAllFiles)
+    /// <param name="includeJsonProtocol">是否在本次提示词中输出完整 JSON 协议说明</param>
+    public string Generate(string projectRoot, List<string> selectedFiles, string userPlan, bool includeAllFiles, bool includeJsonProtocol = true)
     {
         var sb = new StringBuilder();
 
         // 1. 角色与输出规范
         sb.AppendLine("你是一个代码修改助手。请根据【任务说明】修改【项目】中的文件，并在同一份 JSON 中同时给出需要执行的命令。");
+        if (includeJsonProtocol)
+        {
+            sb.Append(BuildFullJsonProtocolSection());
+        }
+        else
+        {
+            sb.Append(BuildBriefJsonProtocolSection());
+        }
+
+        // 2. 任务说明
+        sb.AppendLine("【任务说明】");
+        sb.AppendLine(string.IsNullOrWhiteSpace(userPlan) ? "（用户未填写）" : userPlan.Trim());
+        sb.AppendLine();
+
+        if (selectedFiles != null && selectedFiles.Count > 0)
+        {
+            sb.AppendLine("【本次优先处理的文件】");
+            foreach (var relPath in selectedFiles)
+                sb.AppendLine(relPath);
+            sb.AppendLine();
+        }
+
+        // 3. 项目根目录
+        sb.AppendLine("【项目根目录】");
+        sb.AppendLine(projectRoot);
+        sb.AppendLine();
+
+        // 4. 当前关注的文件内容（带行号）
+        if (selectedFiles != null && selectedFiles.Count > 0)
+        {
+            sb.AppendLine("【当前关注的文件】");
+            foreach (var relPath in selectedFiles)
+            {
+                var fullPath = Path.Combine(projectRoot, relPath);
+                if (File.Exists(fullPath))
+                {
+                    sb.AppendLine($"--- {relPath} ---");
+                    sb.AppendLine("```");
+                    AppendFileWithLineNumbers(sb, fullPath);
+                    sb.AppendLine("```");
+                    sb.AppendLine();
+                }
+            }
+        }
+
+        // 5. 目录结构
+        sb.AppendLine("【目录结构】（最多展示 200 个文件，已过滤常见构建/依赖目录）");
+        AppendDirectoryTree(sb, projectRoot);
+        sb.AppendLine();
+
+        // 6. 其他相关文件
+        if (includeAllFiles)
+        {
+            sb.AppendLine("【项目全部文件内容】");
+            var files = Directory
+                .EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories)
+                .Where(ShouldIncludeFile)
+                .Take(200)
+                .ToList();
+            foreach (var f in files)
+            {
+                var rel = Path.GetRelativePath(projectRoot, f).Replace('\\', '/');
+                sb.AppendLine($"--- {rel} ---");
+                AppendFileWithLineNumbers(sb, f);
+                sb.AppendLine();
+            }
+        }
+        else
+        {
+            sb.AppendLine("（未勾选\"包含全部文件\"，如需其它文件请告诉我）");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// 返回完整的 JSON 协议说明，供新 Session 或手动补协议时复用。
+    /// </summary>
+    public static string BuildFullJsonProtocolSection()
+    {
+        var sb = new StringBuilder();
         sb.AppendLine("我会把你返回的 JSON 直接粘贴回 IDE 并点击“应用”，所以你的输出必须是可直接解析的纯 JSON。");
         sb.AppendLine();
-        sb.AppendLine("【输出 JSON 规范】");
+        sb.AppendLine(FullJsonProtocolMarker);
         sb.AppendLine(@"{
   ""task"": ""一句话说明这次做了什么"",
   ""changes"": [
@@ -103,71 +189,52 @@ public class PromptGenerator
         sb.AppendLine("6. 如果当前任务包含编译报错、运行报错、依赖缺失、测试失败，优先返回用于验证修复结果的命令");
         sb.AppendLine("7. 如果只需要改代码不需要执行命令，必须返回 \"commands\": []，不要省略这个字段");
         sb.AppendLine();
-
-        // 2. 任务说明
-        sb.AppendLine("【任务说明】");
-        sb.AppendLine(string.IsNullOrWhiteSpace(userPlan) ? "（用户未填写）" : userPlan.Trim());
-        sb.AppendLine();
-
-        if (selectedFiles != null && selectedFiles.Count > 0)
-        {
-            sb.AppendLine("【本次优先处理的文件】");
-            foreach (var relPath in selectedFiles)
-                sb.AppendLine(relPath);
-            sb.AppendLine();
-        }
-
-        // 3. 项目根目录
-        sb.AppendLine("【项目根目录】");
-        sb.AppendLine(projectRoot);
-        sb.AppendLine();
-
-        // 4. 当前关注的文件内容（带行号）
-        if (selectedFiles != null && selectedFiles.Count > 0)
-        {
-            sb.AppendLine("【当前关注的文件】");
-            foreach (var relPath in selectedFiles)
-            {
-                var fullPath = Path.Combine(projectRoot, relPath);
-                if (File.Exists(fullPath))
-                {
-                    sb.AppendLine($"--- {relPath} ---");
-                    sb.AppendLine("```");
-                    AppendFileWithLineNumbers(sb, fullPath);
-                    sb.AppendLine("```");
-                    sb.AppendLine();
-                }
-            }
-        }
-
-        // 5. 目录结构
-        sb.AppendLine("【目录结构】（最多展示 200 个文件，已过滤常见构建/依赖目录）");
-        AppendDirectoryTree(sb, projectRoot);
-        sb.AppendLine();
-
-        // 6. 其他相关文件
-        if (includeAllFiles)
-        {
-            sb.AppendLine("【项目全部文件内容】");
-            var files = Directory
-                .EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories)
-                .Where(ShouldIncludeFile)
-                .Take(200)
-                .ToList();
-            foreach (var f in files)
-            {
-                var rel = Path.GetRelativePath(projectRoot, f).Replace('\\', '/');
-                sb.AppendLine($"--- {rel} ---");
-                AppendFileWithLineNumbers(sb, f);
-                sb.AppendLine();
-            }
-        }
-        else
-        {
-            sb.AppendLine("（未勾选\"包含全部文件\"，如需其它文件请告诉我）");
-        }
-
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 返回简短的 JSON 协议提醒，供同一个 Session 后续轮次复用。
+    /// </summary>
+    public static string BuildBriefJsonProtocolSection()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(BriefJsonProtocolLine1);
+        sb.AppendLine(BriefJsonProtocolLine2);
+        sb.AppendLine();
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// 判断提示词中是否已经包含完整 JSON 协议说明。
+    /// </summary>
+    public static bool ContainsFullJsonProtocol(string prompt)
+    {
+        return !string.IsNullOrWhiteSpace(prompt) &&
+               prompt.Contains(FullJsonProtocolMarker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 为现有提示词补上完整 JSON 协议说明；若已包含则原样返回。
+    /// </summary>
+    public static string EnsureFullJsonProtocol(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return BuildFullJsonProtocolSection();
+        if (ContainsFullJsonProtocol(prompt)) return prompt;
+
+        var fullSection = BuildFullJsonProtocolSection();
+        var briefSection = BuildBriefJsonProtocolSection();
+        if (prompt.Contains(BriefJsonProtocolLine1, StringComparison.Ordinal))
+        {
+            return prompt.Replace(briefSection, fullSection, StringComparison.Ordinal);
+        }
+
+        var firstBlockSeparator = prompt.IndexOf(Environment.NewLine + Environment.NewLine, StringComparison.Ordinal);
+        if (firstBlockSeparator >= 0)
+        {
+            return prompt.Insert(firstBlockSeparator + (Environment.NewLine + Environment.NewLine).Length, fullSection);
+        }
+
+        return prompt + Environment.NewLine + Environment.NewLine + fullSection;
     }
 
     /// <summary>把文件按"行号: 内容"格式写入，跳过超大文件</summary>

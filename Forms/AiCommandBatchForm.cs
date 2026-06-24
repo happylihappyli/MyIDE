@@ -53,7 +53,7 @@ public class AiCommandBatchForm : Form
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 360
+            SplitterDistance = (int)(Width * 0.3)
         };
         Controls.Add(split);
 
@@ -293,6 +293,13 @@ public class AiCommandBatchForm : Form
         AppendOutput(command.Command);
 
         var shell = (command.Shell ?? "powershell").Trim().ToLowerInvariant();
+        
+        // 自动探测并修正：如果明确包含 cmd 特有的语法，强制切换为 cmd 模式
+        if (shell == "powershell" && (command.Command.Contains("&&") || command.Command.Contains("cd /d ")))
+        {
+            shell = "cmd";
+        }
+
         ProcessStartInfo psi;
         if (shell == "cmd" || shell == "bat" || shell == "batch")
         {
@@ -315,7 +322,20 @@ public class AiCommandBatchForm : Form
 
         using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
         process.OutputDataReceived += (_, e) => { if (e.Data != null) AppendOutput(e.Data); };
-        process.ErrorDataReceived += (_, e) => { if (e.Data != null) AppendOutput(e.Data); };
+        process.ErrorDataReceived += (_, e) => { 
+            if (e.Data != null) 
+            {
+                // 过滤掉 PowerShell 恼人的内部 XML 错误格式头
+                if (e.Data.StartsWith("#< CLIXML") || e.Data.StartsWith("<Objs Version=")) return;
+                // 简单清理 XML 标签
+                var cleanData = System.Text.RegularExpressions.Regex.Replace(e.Data, "<.*?>", "");
+                cleanData = cleanData.Replace("_x000D__x000A_", "").Replace("&amp;", "&");
+                if (!string.IsNullOrWhiteSpace(cleanData))
+                {
+                    AppendOutput(cleanData);
+                }
+            }
+        };
 
         try
         {

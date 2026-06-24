@@ -1,1 +1,11 @@
 /obj
+/bin/Release_apply_debug
+/bin/Release_apply_fix1
+/bin/Release_final
+/bin/Release_fix1
+/bin/Release_fix2
+/bin/Release_layout
+/bin/Release_ui_upgrade
+/bin/Debug
+/bin/Debug/net8.0-windows
+/obj
