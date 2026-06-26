@@ -11,9 +11,9 @@ namespace MyIDE.Services;
 /// </summary>
 public class PromptGenerator
 {
-    private const string FullJsonProtocolMarker = "【输出 JSON 规范】";
-    private const string BriefJsonProtocolLine1 = "继续沿用当前 Session 已约定的 JSON 协议，本次不要重复解释协议内容。";
-    private const string BriefJsonProtocolLine2 = "仍然只允许返回可直接解析的纯 JSON，并且必须包含 task、changes、commands 三个字段。";
+    private const string FullPatchProtocolMarker = "【输出 Patch 协议】";
+    private const string BriefPatchProtocolLine1 = "继续沿用当前 Session 已约定的 Patch 协议，本次不要重复解释协议内容。";
+    private const string BriefPatchProtocolLine2 = "仍然优先返回 Patch 修改区段，并把命令单独放进【命令】区段中的 JSON 数组。";
 
     /// <summary>
     /// 生成完整提示词
@@ -22,13 +22,13 @@ public class PromptGenerator
     /// <param name="selectedFiles">用户选中的文件列表（相对路径）</param>
     /// <param name="userPlan">用户写的"我要做什么"</param>
     /// <param name="includeAllFiles">是否把所有文件内容都塞进去（文件很多时建议 false）</param>
-    /// <param name="includeJsonProtocol">是否在本次提示词中输出完整 JSON 协议说明</param>
+    /// <param name="includeJsonProtocol">是否在本次提示词中输出完整 Patch 协议说明</param>
     public string Generate(string projectRoot, List<string> selectedFiles, string userPlan, bool includeAllFiles, bool includeJsonProtocol = true)
     {
         var sb = new StringBuilder();
 
         // 1. 角色与输出规范
-        sb.AppendLine("你是一个代码修改助手。请根据【任务说明】修改【项目】中的文件，并在同一份 JSON 中同时给出需要执行的命令。");
+        sb.AppendLine("你是一个代码修改助手。请根据【任务说明】修改【项目】中的文件，并优先使用 Patch 协议返回代码改动。");
         if (includeJsonProtocol)
         {
             sb.Append(BuildFullJsonProtocolSection());
@@ -51,9 +51,28 @@ public class PromptGenerator
             sb.AppendLine();
         }
 
-        // 3. 项目根目录
-        sb.AppendLine("【项目根目录】");
-        sb.AppendLine(projectRoot);
+        // 3. 项目环境和约束
+        sb.AppendLine("【项目环境与约束】");
+        sb.AppendLine($"项目根目录: {projectRoot}");
+        
+        bool isCppProject = Directory.EnumerateFiles(projectRoot, "*.cpp", SearchOption.AllDirectories).Any() ||
+                            Directory.EnumerateFiles(projectRoot, "*.h", SearchOption.AllDirectories).Any() ||
+                            File.Exists(Path.Combine(projectRoot, "SConstruct"));
+        bool usesScons = File.Exists(Path.Combine(projectRoot, "SConstruct"));
+
+        if (isCppProject)
+        {
+            sb.AppendLine("当前操作系统：Windows");
+            if (usesScons)
+            {
+                sb.AppendLine("构建系统：SCons (请使用 scons 命令进行编译)");
+            }
+            else
+            {
+                sb.AppendLine("编译器：g++");
+            }
+            sb.AppendLine("编码规范（极度重要）：源文件保存为 UTF-8 without BOM。如果修改 C++ 代码，必须全部使用 W 版本的 Win32 API，以确保不出现乱码！");
+        }
         sb.AppendLine();
 
         // 4. 当前关注的文件内容（带行号）
@@ -82,18 +101,32 @@ public class PromptGenerator
         // 6. 其他相关文件
         if (includeAllFiles)
         {
-            sb.AppendLine("【项目全部文件内容】");
+            sb.AppendLine("【项目全部文件内容（已排除上面关注的文件）】");
             var files = Directory
                 .EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories)
                 .Where(ShouldIncludeFile)
                 .Take(200)
                 .ToList();
+            
+            int processedCount = 0;
             foreach (var f in files)
             {
                 var rel = Path.GetRelativePath(projectRoot, f).Replace('\\', '/');
+                // 避免重复罗列已在“当前关注的文件”中包含的内容，节省 Token
+                if (selectedFiles != null && selectedFiles.Any(s => string.Equals(s, rel, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
                 sb.AppendLine($"--- {rel} ---");
                 AppendFileWithLineNumbers(sb, f);
                 sb.AppendLine();
+                processedCount++;
+            }
+
+            if (processedCount == 0)
+            {
+                sb.AppendLine("（无其他补充文件）");
             }
         }
         else
@@ -105,101 +138,86 @@ public class PromptGenerator
     }
 
     /// <summary>
-    /// 返回完整的 JSON 协议说明，供新 Session 或手动补协议时复用。
+    /// 返回完整的 Patch 协议说明，供新 Session 或手动补协议时复用。
     /// </summary>
     public static string BuildFullJsonProtocolSection()
     {
         var sb = new StringBuilder();
-        sb.AppendLine("我会把你返回的 JSON 直接粘贴回 IDE 并点击“应用”，所以你的输出必须是可直接解析的纯 JSON。");
+        sb.AppendLine("我会把你返回的内容直接粘贴回 IDE 并点击“预览/应用”，所以你的输出必须严格遵守下面的 Patch 协议。");
         sb.AppendLine();
-        sb.AppendLine(FullJsonProtocolMarker);
-        sb.AppendLine(@"{
-  ""task"": ""一句话说明这次做了什么"",
-  ""changes"": [
-    {
-      ""file"": ""相对项目根目录的路径，如 src/main.cpp"",
-      ""ops"": [
-        { ""type"": ""replace"", ""start"": 10, ""end"": 15, ""content"": ""替换后的新内容（多行用 \n）"" },
-        { ""type"": ""insert"",  ""after"": 20,                ""content"": ""在第 20 行后插入的内容"" },
-        { ""type"": ""delete"",  ""start"": 30, ""end"": 32 }
-      ]
-    }
-  ],
-  ""commands"": [
-    {
-      ""name"": ""命令名称，如 编译项目"",
-      ""reason"": ""为什么要执行这条命令"",
-      ""command"": ""要执行的命令文本，Windows 下优先返回 PowerShell 兼容命令"",
-      ""shell"": ""powershell"",
-      ""workingDirectory"": ""相对项目根目录的工作目录，项目根目录可写 . 或 空字符串"",
-      ""optional"": false
-    }
-  ]
-}");
+        sb.AppendLine(FullPatchProtocolMarker);
+        sb.AppendLine("你的完整输出必须按下面 3 个区段组织：");
+        sb.AppendLine("1. 【任务】");
+        sb.AppendLine("2. 【补丁】");
+        sb.AppendLine("3. 【命令】");
         sb.AppendLine();
         sb.AppendLine("【返回示例】");
-        sb.AppendLine(@"{
-  ""task"": ""修复 Windows 头文件包含顺序并给出重新编译命令"",
-  ""changes"": [
-    {
-      ""file"": ""main.cpp"",
-      ""ops"": [
-        { ""type"": ""replace"", ""start"": 1, ""end"": 3, ""content"": ""#include <windows.h>\n#include <commctrl.h>\nint main() { return 0; }"" }
-      ]
-    }
-  ],
-  ""commands"": [
-    {
-      ""name"": ""重新编译"",
-      ""reason"": ""验证修改后的代码是否通过编译"",
-      ""command"": ""clang++ main.cpp -o app_run.exe -lcomctl32"",
-      ""shell"": ""powershell"",
-      ""workingDirectory"": ""."",
-      ""optional"": false
-    },
-    {
-      ""name"": ""运行程序"",
-      ""reason"": ""编译成功后运行程序进行验证"",
-      ""command"": "".\app_run.exe"",
-      ""shell"": ""powershell"",
-      ""workingDirectory"": ""."",
-      ""optional"": true
-    }
-  ]
-}");
+        sb.AppendLine(@"【任务】
+修复 Windows 头文件包含顺序并给出重新编译命令
+
+【补丁】
+```patch
+*** Begin Patch
+*** Update File: main.cpp
+@@
+-#include <iostream>
++#include <windows.h>
++#include <commctrl.h>
++#include <iostream>
+*** End Patch
+```
+
+【命令】
+```json
+[
+  {
+    ""name"": ""重新编译"",
+    ""reason"": ""验证修改后的代码是否通过编译"",
+    ""command"": ""clang++ main.cpp -o app_run.exe -lcomctl32"",
+    ""shell"": ""powershell"",
+    ""workingDirectory"": ""."",
+    ""optional"": false
+  },
+  {
+    ""name"": ""运行程序"",
+    ""reason"": ""编译成功后运行程序进行验证"",
+    ""command"": "".\app_run.exe"",
+    ""shell"": ""powershell"",
+    ""workingDirectory"": ""."",
+    ""optional"": true
+  }
+]
+```");
         sb.AppendLine();
         sb.AppendLine("【硬性约束】");
-        sb.AppendLine("1. 只输出上述 JSON，不要任何解释、Markdown 代码块、或其他文字");
-        sb.AppendLine("2. 行号从 1 开始，包含起止行");
-        sb.AppendLine("3. content 里的换行用 \\n，双引号用 \\\"");
-        sb.AppendLine("4. 一次只做必要的修改，不要顺手重构");
-        sb.AppendLine("5. 如果需要创建新文件，file 写新文件相对路径，ops 使用 insert，after 固定写 0，content 写完整文件内容");
-        sb.AppendLine("6. 如果目标文件当前不存在，不要报错，按创建新文件处理");
-        sb.AppendLine("7. 如果不需要修改文件，changes 返回 []；如果不需要执行命令，commands 返回 []");
-        sb.AppendLine("8. commands 里的命令必须是当前任务真正需要执行的命令，不要返回解释性命令示例");
-        sb.AppendLine("9. Windows 环境优先返回 PowerShell 可直接执行的命令");
-        sb.AppendLine("10. workingDirectory 必须写相对项目根目录的路径，不要写绝对路径");
+        sb.AppendLine("1. 必须包含【任务】、【补丁】、【命令】三个区段，不要输出其他解释性段落");
+        sb.AppendLine("2. 【补丁】区段必须使用 patch 代码块，内部优先使用如下结构：*** Begin Patch / *** Add File / *** Update File / @@ / *** End Patch");
+        sb.AppendLine("3. patch 中的新文件内容直接写原始文本，不要再做 JSON 式转义，不要把换行写成 \\n");
+        sb.AppendLine("4. 如果不需要修改文件，【补丁】区段留空，或只写一段空 patch；不要伪造无意义修改");
+        sb.AppendLine("5. 如果需要创建新文件，使用 *** Add File: 相对路径，然后每一行文件内容前面加 +");
+        sb.AppendLine("6. 如果需要修改现有文件，使用 *** Update File: 相对路径，并尽量给出足够的上下文行");
+        sb.AppendLine("7. 一次只做必要的修改，不要顺手大范围重构");
+        sb.AppendLine("8. 所有路径都必须写相对项目根目录的路径，不要写绝对路径");
         sb.AppendLine();
         sb.AppendLine("【命令返回协议】");
-        sb.AppendLine("1. 所有命令必须放进 JSON 的 commands 数组里，不要放在 JSON 外面");
-        sb.AppendLine("2. 不要返回 shell 代码块、powershell 代码块、bash 代码块；命令只允许出现在 commands[*].command");
-        sb.AppendLine("3. 如果某条命令只是参考，不应执行，就不要放进 commands");
-        sb.AppendLine("4. 如果修改完成后需要重新编译、运行、测试、安装依赖，请把对应命令写进 commands");
-        sb.AppendLine("5. commands 为空时必须显式返回 []");
-        sb.AppendLine("6. 如果当前任务包含编译报错、运行报错、依赖缺失、测试失败，优先返回用于验证修复结果的命令");
-        sb.AppendLine("7. 如果只需要改代码不需要执行命令，必须返回 \"commands\": []，不要省略这个字段");
+        sb.AppendLine("1. 【命令】区段必须是一个 JSON 数组，可以放在 ```json 代码块里");
+        sb.AppendLine("2. 每条命令字段固定为 name、reason、command、shell、workingDirectory、optional");
+        sb.AppendLine("3. 如果不需要执行命令，返回 []");
+        sb.AppendLine("4. 所有命令必须放进【命令】区段，不要写在区段外面");
+        sb.AppendLine("5. Windows 环境优先返回 PowerShell 可直接执行的命令");
+        sb.AppendLine("6. workingDirectory 必须写相对项目根目录的路径，不要写绝对路径");
         sb.AppendLine();
         return sb.ToString();
     }
 
     /// <summary>
-    /// 返回简短的 JSON 协议提醒，供同一个 Session 后续轮次复用。
+    /// 返回简短的 Patch 协议提醒，供同一个 Session 后续轮次复用。
     /// </summary>
     public static string BuildBriefJsonProtocolSection()
     {
         var sb = new StringBuilder();
-        sb.AppendLine(BriefJsonProtocolLine1);
-        sb.AppendLine(BriefJsonProtocolLine2);
+        sb.AppendLine(BriefPatchProtocolLine1);
+        sb.AppendLine(BriefPatchProtocolLine2);
         sb.AppendLine();
         return sb.ToString();
     }
@@ -210,7 +228,7 @@ public class PromptGenerator
     public static bool ContainsFullJsonProtocol(string prompt)
     {
         return !string.IsNullOrWhiteSpace(prompt) &&
-               prompt.Contains(FullJsonProtocolMarker, StringComparison.Ordinal);
+               prompt.Contains(FullPatchProtocolMarker, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -223,7 +241,7 @@ public class PromptGenerator
 
         var fullSection = BuildFullJsonProtocolSection();
         var briefSection = BuildBriefJsonProtocolSection();
-        if (prompt.Contains(BriefJsonProtocolLine1, StringComparison.Ordinal))
+        if (prompt.Contains(BriefPatchProtocolLine1, StringComparison.Ordinal))
         {
             return prompt.Replace(briefSection, fullSection, StringComparison.Ordinal);
         }
@@ -301,7 +319,7 @@ public class PromptGenerator
         foreach (var s in skipDirs)
             if (norm.Contains(s, StringComparison.OrdinalIgnoreCase)) return false;
 
-        var skipExt = new[] { ".exe", ".dll", ".pdb", ".cache", ".suo", ".user", ".zip", ".rar", ".7z", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf" };
+        var skipExt = new[] { ".exe", ".dll", ".pdb", ".cache", ".suo", ".user", ".zip", ".rar", ".7z", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".dblite", ".db", ".sqlite", ".sqlite3" };
         var ext = Path.GetExtension(path).ToLowerInvariant();
         foreach (var s in skipExt)
             if (ext == s) return false;

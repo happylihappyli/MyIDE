@@ -53,7 +53,7 @@ public class AiCommandBatchForm : Form
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = (int)(Width * 0.3)
+            SplitterDistance = 250
         };
         Controls.Add(split);
 
@@ -344,10 +344,22 @@ public class AiCommandBatchForm : Form
             process.BeginErrorReadLine();
             await process.WaitForExitAsync();
             AppendOutput($"[退出码] {process.ExitCode}");
+            
+            if (process.ExitCode != 0)
+            {
+                if (Owner is MainForm mainForm)
+                {
+                    await mainForm.AutoExtractAndSendErrorAsync($"批量执行命令失败 (退出码: {process.ExitCode})", _txtOutput.Text);
+                }
+            }
         }
         catch (Exception ex)
         {
             AppendOutput("[执行失败] " + ex.Message);
+            if (Owner is MainForm mainForm)
+            {
+                await mainForm.AutoExtractAndSendErrorAsync("批量执行命令异常", _txtOutput.Text);
+            }
         }
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using MyIDE.Models;
 
@@ -44,10 +45,26 @@ public class ChangeApplier
         _projectRoot = projectRoot;
     }
 
+    private const string PatchBeginMarker = "*** Begin Patch";
+    private const string PatchEndMarker = "*** End Patch";
+
     /// <summary>
-    /// 解析 AI 返回的 JSON 文本（容忍 ```json 包裹、容忍前后杂讯）
+    /// 解析 AI 返回的文本，优先支持 Patch 协议，同时兼容旧 JSON 协议。
     /// </summary>
     public ChangePlan ParseJson(string rawText)
+    {
+        if (LooksLikePatchResponse(rawText))
+        {
+            return ParsePatchResponse(rawText);
+        }
+
+        return ParseLegacyJson(rawText);
+    }
+
+    /// <summary>
+    /// 解析旧版 JSON 响应文本（容忍 ```json 包裹、容忍前后杂讯）。
+    /// </summary>
+    private ChangePlan ParseLegacyJson(string rawText)
     {
         if (string.IsNullOrWhiteSpace(rawText))
             throw new InvalidDataException("AI 返回内容为空");
@@ -84,6 +101,341 @@ public class ChangeApplier
             
         PostProcessParsedPlan(plan);
         return plan;
+    }
+
+    /// <summary>
+    /// 判断文本是否更像 Patch 协议响应。
+    /// </summary>
+    private static bool LooksLikePatchResponse(string rawText)
+    {
+        if (string.IsNullOrWhiteSpace(rawText)) return false;
+
+        var text = rawText.Trim();
+        return text.Contains(PatchBeginMarker, StringComparison.Ordinal) ||
+               text.StartsWith("```patch", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("【补丁】", StringComparison.Ordinal) ||
+               text.Contains("*** Add File:", StringComparison.Ordinal) ||
+               text.Contains("*** Update File:", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 解析新的 Patch 协议响应，支持【任务】、【补丁】和【命令】三个区段。
+    /// </summary>
+    private ChangePlan ParsePatchResponse(string rawText)
+    {
+        if (string.IsNullOrWhiteSpace(rawText))
+            throw new InvalidDataException("AI 返回内容为空");
+
+        var normalized = NormalizeLineEndings(rawText).Trim();
+        var patchText = ExtractPatchText(normalized);
+        var plan = new ChangePlan
+        {
+            Task = ExtractSectionText(normalized, "【任务】", new[] { "【补丁】", "【命令】" })
+        };
+        if (string.IsNullOrWhiteSpace(plan.Task))
+        {
+            plan.Task = "应用 AI Patch 修改";
+        }
+
+        plan.Commands = ParseCommandsSection(normalized);
+        plan.Changes = string.IsNullOrWhiteSpace(patchText)
+            ? new List<FileChange>()
+            : ParsePatchChanges(patchText);
+        if (plan.Changes.Count == 0 && plan.Commands.Count == 0)
+            throw new InvalidDataException("Patch 响应中没有识别到修改或命令");
+        PostProcessParsedPlan(plan);
+        return plan;
+    }
+
+    /// <summary>
+    /// 提取命令区，允许为空；命令内容继续使用 JSON 数组，降低额外解析复杂度。
+    /// </summary>
+    private List<AiCommand> ParseCommandsSection(string normalizedText)
+    {
+        var commandsText = ExtractSectionText(normalizedText, "【命令】", Array.Empty<string>());
+        if (string.IsNullOrWhiteSpace(commandsText))
+        {
+            return new List<AiCommand>();
+        }
+
+        var extracted = ExtractJsonArray(commandsText);
+        if (string.IsNullOrWhiteSpace(extracted))
+        {
+            return new List<AiCommand>();
+        }
+
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true,
+        };
+
+        return JsonSerializer.Deserialize<List<AiCommand>>(extracted, options) ?? new List<AiCommand>();
+    }
+
+    /// <summary>
+    /// 解析 Patch 中的文件修改列表。
+    /// </summary>
+    private List<FileChange> ParsePatchChanges(string patchText)
+    {
+        var lines = NormalizeLineEndings(patchText).Split('\n');
+        var changes = new List<FileChange>();
+        var i = 0;
+
+        while (i < lines.Length)
+        {
+            var line = lines[i];
+            if (line.StartsWith(PatchBeginMarker, StringComparison.Ordinal) ||
+                line.StartsWith(PatchEndMarker, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(line))
+            {
+                i++;
+                continue;
+            }
+
+            if (line.StartsWith("*** Add File: ", StringComparison.Ordinal))
+            {
+                var filePath = line["*** Add File: ".Length..].Trim();
+                i++;
+                var newFileLines = new List<string>();
+                while (i < lines.Length && !lines[i].StartsWith("*** ", StringComparison.Ordinal))
+                {
+                    var contentLine = lines[i];
+                    if (contentLine.StartsWith("+", StringComparison.Ordinal))
+                    {
+                        newFileLines.Add(contentLine[1..]);
+                    }
+                    i++;
+                }
+
+                changes.Add(new FileChange
+                {
+                    File = NormalizePatchPath(filePath),
+                    Description = "Patch 新建文件",
+                    Ops = new List<LineOp>
+                    {
+                        new()
+                        {
+                            Type = "insert",
+                            After = 0,
+                            Content = string.Join("\n", newFileLines)
+                        }
+                    }
+                });
+                continue;
+            }
+
+            if (line.StartsWith("*** Update File: ", StringComparison.Ordinal))
+            {
+                var filePath = line["*** Update File: ".Length..].Trim();
+                i++;
+                var fileChange = new FileChange
+                {
+                    File = NormalizePatchPath(filePath),
+                    Description = "Patch 更新文件"
+                };
+
+                while (i < lines.Length && !lines[i].StartsWith("*** ", StringComparison.Ordinal))
+                {
+                    if (!lines[i].StartsWith("@@", StringComparison.Ordinal))
+                    {
+                        i++;
+                        continue;
+                    }
+
+                    i++;
+                    var hunkLines = new List<string>();
+                    while (i < lines.Length &&
+                           !lines[i].StartsWith("@@", StringComparison.Ordinal) &&
+                           !lines[i].StartsWith("*** ", StringComparison.Ordinal))
+                    {
+                        if (lines[i] == "*** End of File")
+                        {
+                            i++;
+                            break;
+                        }
+
+                        hunkLines.Add(lines[i]);
+                        i++;
+                    }
+
+                    var op = ConvertPatchHunkToOp(hunkLines);
+                    if (op != null)
+                    {
+                        fileChange.Ops.Add(op);
+                    }
+                }
+
+                if (fileChange.Ops.Count > 0)
+                {
+                    changes.Add(fileChange);
+                }
+                continue;
+            }
+
+            i++;
+        }
+
+        return changes;
+    }
+
+    /// <summary>
+    /// 把单个 patch hunk 转成 replace 操作，后续由旧的模拟/应用逻辑继续处理。
+    /// </summary>
+    private static LineOp? ConvertPatchHunkToOp(List<string> hunkLines)
+    {
+        if (hunkLines.Count == 0) return null;
+
+        var oldLines = new List<string>();
+        var newLines = new List<string>();
+
+        foreach (var line in hunkLines)
+        {
+            if (line.Length == 0)
+            {
+                oldLines.Add("");
+                newLines.Add("");
+                continue;
+            }
+
+            if (line.StartsWith(" ", StringComparison.Ordinal))
+            {
+                var content = line[1..];
+                oldLines.Add(content);
+                newLines.Add(content);
+                continue;
+            }
+
+            if (line.StartsWith("-", StringComparison.Ordinal))
+            {
+                oldLines.Add(line[1..]);
+                continue;
+            }
+
+            if (line.StartsWith("+", StringComparison.Ordinal))
+            {
+                newLines.Add(line[1..]);
+            }
+        }
+
+        if (oldLines.Count == 0)
+        {
+            return new LineOp
+            {
+                Type = "insert",
+                After = 0,
+                Content = string.Join("\n", newLines)
+            };
+        }
+
+        return new LineOp
+        {
+            Type = "replace",
+            Start = 1,
+            End = Math.Max(1, oldLines.Count),
+            Content = string.Join("\n", newLines),
+            OldContent = string.Join("\n", oldLines)
+        };
+    }
+
+    /// <summary>
+    /// 提取 patch 区块，支持纯 patch、带【补丁】标题和 ```patch 包裹三种形式。
+    /// </summary>
+    private static string ExtractPatchText(string normalizedText)
+    {
+        var beginIndex = normalizedText.IndexOf(PatchBeginMarker, StringComparison.Ordinal);
+        var endIndex = normalizedText.LastIndexOf(PatchEndMarker, StringComparison.Ordinal);
+        if (beginIndex >= 0 && endIndex > beginIndex)
+        {
+            return normalizedText.Substring(beginIndex, endIndex - beginIndex + PatchEndMarker.Length);
+        }
+
+        var fencedMatch = Regex.Match(
+            normalizedText,
+            @"```patch\s*(?<body>[\s\S]*?)```",
+            RegexOptions.IgnoreCase);
+        if (fencedMatch.Success)
+        {
+            return fencedMatch.Groups["body"].Value.Trim();
+        }
+
+        if (normalizedText.Contains("【命令】", StringComparison.Ordinal))
+        {
+            return "";
+        }
+
+        return normalizedText;
+    }
+
+    /// <summary>
+    /// 提取形如【任务】/【补丁】/【命令】的区段文本。
+    /// </summary>
+    private static string ExtractSectionText(string text, string sectionMarker, string[] nextMarkers)
+    {
+        var startIndex = text.IndexOf(sectionMarker, StringComparison.Ordinal);
+        if (startIndex < 0) return "";
+
+        startIndex += sectionMarker.Length;
+        var remaining = text[startIndex..];
+        var endIndex = remaining.Length;
+        foreach (var next in nextMarkers)
+        {
+            if (string.IsNullOrWhiteSpace(next)) continue;
+            var markerIndex = remaining.IndexOf(next, StringComparison.Ordinal);
+            if (markerIndex >= 0 && markerIndex < endIndex)
+            {
+                endIndex = markerIndex;
+            }
+        }
+
+        return remaining[..endIndex].Trim();
+    }
+
+    /// <summary>
+    /// 从命令区文本里抽出 JSON 数组，兼容 ```json 包裹。
+    /// </summary>
+    private static string ExtractJsonArray(string text)
+    {
+        var trimmed = text.Trim();
+        var fencedMatch = Regex.Match(
+            trimmed,
+            @"```json\s*(?<body>[\s\S]*?)```",
+            RegexOptions.IgnoreCase);
+        if (fencedMatch.Success)
+        {
+            trimmed = fencedMatch.Groups["body"].Value.Trim();
+        }
+
+        var first = trimmed.IndexOf('[');
+        var last = trimmed.LastIndexOf(']');
+        if (first >= 0 && last > first)
+        {
+            return trimmed.Substring(first, last - first + 1);
+        }
+
+        return trimmed;
+    }
+
+    /// <summary>
+    /// 把 patch 里的文件路径统一规范化为项目相对路径。
+    /// </summary>
+    private static string NormalizePatchPath(string filePath)
+    {
+        return (filePath ?? "")
+            .Trim()
+            .Replace('/', Path.DirectorySeparatorChar)
+            .Replace('\\', Path.DirectorySeparatorChar);
+    }
+
+    /// <summary>
+    /// 统一文本换行符，方便 patch 和区段解析。
+    /// </summary>
+    private static string NormalizeLineEndings(string text)
+    {
+        return (text ?? string.Empty)
+            .Replace("\r\n", "\n")
+            .Replace('\r', '\n');
     }
 
     private void PostProcessParsedPlan(ChangePlan plan)
@@ -277,27 +629,20 @@ public class ChangeApplier
     private void ApplyOneFile(FileChange fc, ApplySummary summary, bool createBackup)
     {
         var fullPath = Path.Combine(_projectRoot, fc.File);
-        List<string> lines;
         bool isNewFile = !File.Exists(fullPath);
+        List<string> lines;
         
         if (isNewFile)
         {
-            // 文件不存在，创建新文件
             lines = new List<string>();
             summary.Log.Add($"[创建] {fc.File}");
-            
-            // 确保父目录存在
-            var dir = Path.GetDirectoryName(fullPath);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-            {
-                Directory.CreateDirectory(dir);
-                summary.Log.Add($"[创建目录] {dir}");
-            }
         }
         else
         {
             lines = File.ReadAllLines(fullPath).ToList();
         }
+
+        var workingLines = new List<string>(lines);
 
         // 先计算并打印将要处理的 Ops，方便调试
         var ops = fc.Ops
@@ -311,26 +656,67 @@ public class ChangeApplier
             .OrderByDescending(x => OpBaseIndex(x.Raw, x.Start0, x.After0))
             .ToList();
 
-        summary.Log.Add($"[调试] 准备对 {fc.File} 应用 {ops.Count} 个操作，当前文件行数: {lines.Count}");
+        summary.Log.Add($"[调试] 准备对 {fc.File} 应用 {ops.Count} 个操作，当前文件行数: {workingLines.Count}");
 
-        // 只有文件已存在时才创建备份
-        if (createBackup && !isNewFile)
-        {
-            var backupPath = fullPath + ".bak";
-            File.Copy(fullPath, backupPath, overwrite: true);
-        }
+        var localSuccessOps = 0;
+        var localLogs = new List<string>();
 
         foreach (var op in ops)
         {
-            var r = ApplyOneOp(lines, op.Raw, op.Start0, op.End0, op.After0);
-            if (r.Success) summary.SuccessOps++;
-            summary.Log.Add($"[{fc.File}] {op.Raw.Type} -> {r.Message}");
+            var r = ApplyOneOp(workingLines, op.Raw, op.Start0, op.End0, op.After0);
+            localLogs.Add($"[{fc.File}] {op.Raw.Type} -> {r.Message}");
+            if (!r.Success)
+            {
+                summary.Log.AddRange(localLogs);
+                summary.Log.Add($"[中止写盘] {fc.File}：存在未匹配或失败的补丁块，已放弃写入该文件");
+                return;
+            }
+
+            localSuccessOps++;
+        }
+
+        // 只有真正准备写盘时才创建备份/目录，保证单文件应用具备事务性。
+        if (!isNewFile)
+        {
+            if (createBackup)
+            {
+                try
+                {
+                    var backupPath = fullPath + ".bak";
+                    File.Copy(fullPath, backupPath, overwrite: true);
+                }
+                catch (Exception ex)
+                {
+                    summary.Log.Add($"[备份失败，忽略] {ex.Message}");
+                }
+            }
+        }
+        else
+        {
+            var dir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+                summary.Log.Add($"[创建目录] {dir}");
+            }
         }
 
         // 写回文件（统一保证以换行符结尾）
-        var newContent = string.Join(Environment.NewLine, lines);
+        var newContent = string.Join(Environment.NewLine, workingLines);
         if (newContent.Length > 0 && !newContent.EndsWith(Environment.NewLine)) newContent += Environment.NewLine;
-        File.WriteAllText(fullPath, newContent, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        
+        try
+        {
+            File.WriteAllText(fullPath, newContent, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            summary.SuccessOps += localSuccessOps;
+            summary.Log.AddRange(localLogs);
+            summary.Log.Add($"[写盘成功] {fullPath}");
+        }
+        catch (Exception ex)
+        {
+            summary.Log.Add($"[写盘失败] {fullPath} : {ex.Message}");
+            throw; // 抛出异常以便上层捕获并计入失败
+        }
     }
 
     private static int OpBaseIndex(LineOp raw, int start0, int after0)
@@ -386,11 +772,56 @@ public class ChangeApplier
                         }
                     }
                 }
+
+                if (bestMatchStart == -1 && oldBlock.Length <= lines.Count)
+                {
+                    for (int i = 0; i <= lines.Count - oldBlock.Length; i++)
+                    {
+                        bool match = true;
+                        for (int j = 0; j < oldBlock.Length; j++)
+                        {
+                            if (lines[i + j].Trim() != oldBlock[j].Trim())
+                            {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match)
+                        {
+                            bestMatchStart = i;
+                            break;
+                        }
+                    }
+                }
                 
                 if (bestMatchStart != -1)
                 {
                     start0 = bestMatchStart;
                     end0 = bestMatchStart + oldBlock.Length - 1;
+                }
+                else
+                {
+                    var newBlock = SplitContentLines(op.Content);
+                    var newBlockMatchStart = FindBestMatchingBlock(lines, newBlock, start0);
+                    if (newBlockMatchStart != -1)
+                    {
+                        return new ApplyResult
+                        {
+                            Success = true,
+                            Message = $"补丁目标内容已存在，第 {newBlockMatchStart + 1} 行附近跳过重复应用"
+                        };
+                    }
+
+                    var rangeMatches = BlockMatchesAt(lines, start0, oldBlock);
+                    if (!rangeMatches)
+                    {
+                        var preview = string.Join(" | ", oldBlock.Take(3).Select(x => x.Trim()));
+                        return new ApplyResult
+                        {
+                            Success = false,
+                            Message = $"未找到与补丁上下文匹配的原文块，已阻止替换。片段：{preview}"
+                        };
+                    }
                 }
             }
         }
@@ -445,5 +876,55 @@ public class ChangeApplier
             default:
                 return new ApplyResult { Success = false, Message = $"未知操作类型：{op.Type}" };
         }
+    }
+
+    /// <summary>
+    /// 判断目标文件在给定起点处是否仍然包含补丁要求替换的旧内容。
+    /// </summary>
+    private static bool BlockMatchesAt(List<string> lines, int start0, string[] oldBlock)
+    {
+        if (start0 < 0 || oldBlock.Length == 0) return false;
+        if (start0 + oldBlock.Length > lines.Count) return false;
+
+        for (int i = 0; i < oldBlock.Length; i++)
+        {
+            if (!string.Equals(lines[start0 + i].Trim(), oldBlock[i].Trim(), StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// 在当前文件中查找与目标块内容一致的位置；若已存在，则说明该补丁很可能已经应用过。
+    /// </summary>
+    private static int FindBestMatchingBlock(List<string> lines, string[] block, int preferredStart0)
+    {
+        if (block.Length == 0 || lines.Count < block.Length) return -1;
+
+        var bestMatchStart = -1;
+        for (int i = 0; i <= lines.Count - block.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < block.Length; j++)
+            {
+                if (!string.Equals(lines[i + j].Trim(), block[j].Trim(), StringComparison.Ordinal))
+                {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (!match) continue;
+
+            if (bestMatchStart == -1 || Math.Abs(i - preferredStart0) < Math.Abs(bestMatchStart - preferredStart0))
+            {
+                bestMatchStart = i;
+            }
+        }
+
+        return bestMatchStart;
     }
 }

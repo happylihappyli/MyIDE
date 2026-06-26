@@ -9,3 +9,7 @@
 /bin/Debug
 /bin/Debug/net8.0-windows
 /obj
+*.pyc
+/artifacts
+/MyIDE.SmokeTest
+/MyIDE.SmokeTest/obj

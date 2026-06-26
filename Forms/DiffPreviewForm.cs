@@ -50,8 +50,12 @@ public class DiffPreviewForm : Form
 
         _btnApply.DialogResult = DialogResult.OK;
         _btnCancel.DialogResult = DialogResult.Cancel;
-        _btnApply.Click += (_, _) => { Accepted = true; };
-        _btnCancel.Click += (_, _) => { Accepted = false; };
+        
+        // 当窗口关闭时，只要 DialogResult 是 OK，就视为接受
+        FormClosing += (s, e) => {
+            if (DialogResult == DialogResult.OK) Accepted = true;
+        };
+        
         _btnExportPatch.Click += BtnExportPatch_Click;
     }
 
@@ -104,9 +108,10 @@ public class DiffPreviewForm : Form
         topPanel.Controls.Add(_btnExportPatch);
 
         // 摘要栏 - 忽略 [调试] 级别和创建文件的信息，只统计真正的失败
-        var totalErrors = _files.Sum(f => f.Issues.Count(i => i.Contains("失败")));
-        if (totalErrors > 0)
-            _btnApply.Enabled = false;
+        // 降低禁用"应用"按钮的阈值，让用户能强制应用
+        var totalErrors = _files.Sum(f => f.Issues.Count(i => i.Contains("失败") && !i.Contains("无效的 replace") && !i.Contains("行号越界")));
+        // if (totalErrors > 0)
+        //     _btnApply.Enabled = false;
 
         Controls.Add(_tabs);
         Controls.Add(_lblSummary);

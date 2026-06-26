@@ -4,9 +4,9 @@ using System.Text.Json.Serialization;
 namespace MyIDE.Models;
 
 /// <summary>
-/// 持久化保存的 AI 返回内容记录。
+/// 持久化保存的计划历史记录。
 /// </summary>
-public class SavedAiJson
+public class SavedPlanHistory
 {
     /// <summary>记录唯一标识。</summary>
     [JsonPropertyName("id")]
@@ -16,21 +16,13 @@ public class SavedAiJson
     [JsonPropertyName("projectRoot")]
     public string ProjectRoot { get; set; } = "";
 
-    /// <summary>AI 返回任务摘要。</summary>
-    [JsonPropertyName("task")]
-    public string Task { get; set; } = "";
+    /// <summary>计划标题，通常取首行摘要。</summary>
+    [JsonPropertyName("title")]
+    public string Title { get; set; } = "";
 
-    /// <summary>原始返回文本，可为 Patch 协议内容或旧 JSON。</summary>
-    [JsonPropertyName("jsonText")]
-    public string JsonText { get; set; } = "";
-
-    /// <summary>修改文件数。</summary>
-    [JsonPropertyName("changeCount")]
-    public int ChangeCount { get; set; }
-
-    /// <summary>命令数。</summary>
-    [JsonPropertyName("commandCount")]
-    public int CommandCount { get; set; }
+    /// <summary>完整计划文本。</summary>
+    [JsonPropertyName("text")]
+    public string Text { get; set; } = "";
 
     /// <summary>最近更新时间。</summary>
     [JsonPropertyName("updatedAt")]

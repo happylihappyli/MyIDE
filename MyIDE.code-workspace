@@ -5,7 +5,15 @@
 		},
 		{
 			"path": "../../python/my_chrome"
+		},
+		{
+			"path": "../hello"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"files.exclude": {
+			"**/bin": false,
+			"**/obj": false
+		}
+	}
 }
