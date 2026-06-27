@@ -24,9 +24,63 @@ public partial class MainForm
             LoadDirectory(dlg.SelectedPath);
     }
 
+    /// <summary>
+    /// 新建一个项目目录，并在创建成功后直接作为当前项目打开。
+    /// </summary>
+    private void CreateNewProjectDirectory()
+    {
+        using var dlg = new FolderBrowserDialog
+        {
+            Description = "请选择新项目目录的父目录"
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK || !Directory.Exists(dlg.SelectedPath))
+        {
+            return;
+        }
+
+        var input = Microsoft.VisualBasic.Interaction.InputBox("请输入新项目目录名称：", "新建项目目录", "NewProject");
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return;
+        }
+
+        var projectName = input.Trim();
+        if (projectName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            MessageBox.Show("项目目录名称包含非法字符！", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        try
+        {
+            var newProjectPath = Path.Combine(dlg.SelectedPath, projectName);
+            if (Directory.Exists(newProjectPath))
+            {
+                MessageBox.Show("该项目目录已存在！", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (File.Exists(newProjectPath))
+            {
+                MessageBox.Show("存在同名文件，无法创建项目目录！", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            Directory.CreateDirectory(newProjectPath);
+            Log($"✔ 已创建项目目录：{newProjectPath}");
+            LoadDirectory(newProjectPath);
+            ShowTransientStatus("● 已创建并打开新项目目录", Success);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"创建项目目录失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void LoadDirectory(string path)
     {
         _projectRoot = path;
+        _lastGeneratedPrompt = "";
         _lastSidebarSyncedAiJson = "";
         _lastSavedPlanHistoryText = "";
         _lastPlanHistorySavedAt = DateTime.MinValue;
@@ -44,11 +98,23 @@ public partial class MainForm
 
             _settings.AddRecentDir(path);
             UpdateRecentMenu();
+            PreparePatchProtocolForOpenedProject();
         }
         catch (Exception ex)
         {
             Log($"✖ 加载目录失败：{ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 打开项目后，自动标记下一次生成提示词时附带完整 Patch 协议，并给出提醒。
+    /// </summary>
+    private void PreparePatchProtocolForOpenedProject()
+    {
+        _settings.IncludePromptProtocolOnNextPrompt = true;
+        _settings.Save();
+        Log("✔ 已为当前项目准备 Patch 协议；下一次生成提示词会自动附带完整协议。");
+        ShowTransientStatus("● 下次生成提示词将自动带 Patch 协议", Success);
     }
 
     /// <summary>
@@ -85,6 +151,72 @@ public partial class MainForm
     /// 刷新文件树前，将项目中的 .bak 文件移动到统一备份目录，避免备份文件继续堆在项目内。
     /// </summary>
     private int ArchiveProjectBakFilesOnRefresh()
+        => ArchiveProjectBakFiles("RefreshBak");
+
+    /// <summary>
+    /// 手动归档当前项目中的所有 .bak 文件，并在完成后刷新文件树。
+    /// </summary>
+    private void ArchiveAllProjectBakFiles()
+    {
+        if (string.IsNullOrWhiteSpace(_projectRoot) || !Directory.Exists(_projectRoot))
+        {
+            ShowTransientStatus("● 请先打开项目目录", Warning);
+            return;
+        }
+
+        var bakFiles = GetProjectBakFiles("ManualBak");
+        var bakCount = bakFiles.Count;
+        if (bakCount == 0)
+        {
+            _lblStatus.Text = "● 当前项目中没有 .bak 文件";
+            _lblStatus.ForeColor = Success;
+            ShowTransientStatus("● 当前项目中没有 .bak 文件", Success);
+            return;
+        }
+
+        var confirm = MessageBox.Show(
+            this,
+            $"本次将归档 {bakCount} 个 .bak 文件，是否继续？",
+            "确认归档 .bak 文件",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+        if (confirm != DialogResult.Yes)
+        {
+            return;
+        }
+
+        int archivedBakCount = 0;
+        try
+        {
+            archivedBakCount = ArchiveProjectBakFiles("ManualBak", bakFiles);
+            RefreshProjectTree();
+            _lblStatus.Text = archivedBakCount > 0
+                ? $"● 已手动归档 {archivedBakCount} 个 .bak 文件"
+                : "● 未找到需要归档的 .bak 文件";
+            _lblStatus.ForeColor = Success;
+            ShowTransientStatus(
+                archivedBakCount > 0
+                    ? $"● 已归档 {archivedBakCount} 个 .bak 文件"
+                    : "● 当前项目中没有 .bak 文件",
+                Success);
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ 手动归档 .bak 文件失败：{ex.Message}");
+            ShowTransientStatus("● 归档 .bak 文件失败，请查看日志", Error);
+        }
+    }
+
+    /// <summary>
+    /// 将项目中的 .bak 文件移动到统一备份目录的指定子目录下。
+    /// </summary>
+    private int ArchiveProjectBakFiles(string archiveCategory)
+        => ArchiveProjectBakFiles(archiveCategory, bakFiles: null);
+
+    /// <summary>
+    /// 将指定的 .bak 文件列表移动到统一备份目录的指定子目录下。
+    /// </summary>
+    private int ArchiveProjectBakFiles(string archiveCategory, IReadOnlyCollection<string>? bakFiles)
     {
         if (string.IsNullOrWhiteSpace(_projectRoot) || !Directory.Exists(_projectRoot))
         {
@@ -94,20 +226,17 @@ public partial class MainForm
         string backupRoot = GetDeletedFilesBackupRoot();
         string archiveRoot = Path.Combine(
             backupRoot,
-            "RefreshBak",
+            archiveCategory,
             DateTime.Now.ToString("yyyy-MM-dd"),
             Path.GetFileName(_projectRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
         Directory.CreateDirectory(archiveRoot);
 
         string normalizedProjectRoot = Path.GetFullPath(_projectRoot);
-        string normalizedArchiveRoot = Path.GetFullPath(archiveRoot);
-        var bakFiles = Directory
-            .EnumerateFiles(normalizedProjectRoot, "*.bak", SearchOption.AllDirectories)
-            .Where(file => !IsPathUnderDirectory(file, normalizedArchiveRoot))
+        var filesToArchive = (bakFiles ?? GetProjectBakFiles(archiveCategory))
             .ToList();
 
         int movedCount = 0;
-        foreach (var bakFile in bakFiles)
+        foreach (var bakFile in filesToArchive)
         {
             try
             {
@@ -128,6 +257,30 @@ public partial class MainForm
         }
 
         return movedCount;
+    }
+
+    /// <summary>
+    /// 获取当前项目中可归档的 .bak 文件列表，并排除目标归档目录本身，避免重复搬运。
+    /// </summary>
+    private List<string> GetProjectBakFiles(string archiveCategory)
+    {
+        if (string.IsNullOrWhiteSpace(_projectRoot) || !Directory.Exists(_projectRoot))
+        {
+            return new List<string>();
+        }
+
+        string normalizedProjectRoot = Path.GetFullPath(_projectRoot);
+        string archiveRoot = Path.Combine(
+            GetDeletedFilesBackupRoot(),
+            archiveCategory,
+            DateTime.Now.ToString("yyyy-MM-dd"),
+            Path.GetFileName(_projectRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
+        string normalizedArchiveRoot = Path.GetFullPath(archiveRoot);
+
+        return Directory
+            .EnumerateFiles(normalizedProjectRoot, "*.bak", SearchOption.AllDirectories)
+            .Where(file => !IsPathUnderDirectory(file, normalizedArchiveRoot))
+            .ToList();
     }
 
     /// <summary>

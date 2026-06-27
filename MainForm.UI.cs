@@ -110,6 +110,15 @@ public partial class MainForm
         BackColor = BgPanel,
         Margin = new Padding(0, 7, 0, 0)
     };
+    private readonly CheckBox _chkEnableCommandTimeout = new()
+    {
+        AutoSize = true,
+        Checked = false,
+        Text = "超时保护",
+        ForeColor = FgMuted,
+        BackColor = BgPanel,
+        Margin = new Padding(0, 7, 8, 0)
+    };
     private string _terminalCwd = "";
     private System.Diagnostics.Process? _activeRunProcess;
     private string _activeRunProcessDisplayName = "";
@@ -505,12 +514,14 @@ public partial class MainForm
         return result.Reason switch
         {
             "sent" => "已自动发送",
+            "countdown_started" => "已填充输入框，等待倒计时自动发送",
             "filled" => "已填充输入框",
             "browser_not_ready" => "浏览器未就绪",
             "page_not_supported" => "当前页面不支持发送",
             "input_not_found" => "未找到输入框",
             "input_set_failed" => "写入输入框失败",
             "send_button_not_found" => "未找到发送按钮",
+            "sent_by_devtools" => "已通过坐标强制点击发送",
             "script_result_empty" => "页面脚本无返回",
             "client_exception" => "调用桥接服务失败",
             _ => string.IsNullOrWhiteSpace(result.Reason) ? "未知状态" : result.Reason
@@ -535,6 +546,7 @@ public partial class MainForm
         _isSavedPlanCollapsed = _settings.IsSavedPlanCollapsed;
         _isSavedJsonCollapsed = _settings.IsSavedJsonCollapsed;
         _isSavedCommandsCollapsed = _settings.IsSavedCommandsCollapsed;
+        _chkEnableCommandTimeout.Checked = _settings.EnableCommandTimeouts;
 
         // 默认示例计划
         _txtPlan.Text = string.IsNullOrWhiteSpace(_settings.LastPlanText)
@@ -572,7 +584,7 @@ public partial class MainForm
         _txtPlan.Click += UpdateCursorPos;
         _txtPlan.KeyUp += UpdateCursorPos;
         _txtPlan.TextChanged += (_, _) => SchedulePlanTextSave();
-        _txtPlan.Leave += (_, _) => SaveCurrentPlanText(forceHistory: true);
+        _txtPlan.Leave += (_, _) => SaveCurrentPlanText();
         _txtAi.TextChanged += (_, _) => UpdateAiJsonBufferStatus();
         _btnUseSavedPlan.FlatAppearance.BorderSize = 0;
         _btnCopySavedPlan.FlatAppearance.BorderSize = 0;
@@ -628,6 +640,11 @@ public partial class MainForm
         _bottomOutputTabs.DrawItem += BottomOutputTabs_DrawItem;
         _bottomOutputTabs.SelectedIndexChanged += (_, _) => HandleBottomOutputTabChanged();
         _chkAiWrap.CheckedChanged += (_, _) => ApplyAiWrapSetting();
+        _chkEnableCommandTimeout.CheckedChanged += (_, _) =>
+        {
+            _settings.EnableCommandTimeouts = _chkEnableCommandTimeout.Checked;
+            _settings.Save();
+        };
         _txtAi.TextChanged += (_, _) => ScheduleAiJsonSidebarSync();
         _txtAi.Leave += (_, _) => TrySaveCurrentAiJsonToSidebar();
         _aiJsonSidebarSyncTimer.Tick += (_, _) =>
@@ -929,36 +946,44 @@ public partial class MainForm
     /// </summary>
     private string? FindMyChromeExecutable(string projectPath)
     {
+        static string? FindLatestExecutable(string baseDirectory)
+        {
+            foreach (var exeName in new[] { "MyChrome.exe", "MyWebView2Browser.exe" })
+            {
+                var exePath = Directory
+                    .EnumerateFiles(baseDirectory, exeName, SearchOption.AllDirectories)
+                    .OrderByDescending(File.GetLastWriteTime)
+                    .FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(exePath))
+                {
+                    return exePath;
+                }
+            }
+
+            return null;
+        }
+
         var projectDirectory = Path.GetDirectoryName(projectPath);
         if (string.IsNullOrWhiteSpace(projectDirectory)) return null;
 
         var myIdeReleaseDir = Path.Combine(projectDirectory, "bin", "Release_myide");
         if (Directory.Exists(myIdeReleaseDir))
         {
-            var myIdeReleaseExe = Directory
-                .EnumerateFiles(myIdeReleaseDir, "MyWebView2Browser.exe", SearchOption.AllDirectories)
-                .OrderByDescending(File.GetLastWriteTime)
-                .FirstOrDefault();
+            var myIdeReleaseExe = FindLatestExecutable(myIdeReleaseDir);
             if (!string.IsNullOrWhiteSpace(myIdeReleaseExe)) return myIdeReleaseExe;
         }
 
         var releaseDir = Path.Combine(projectDirectory, "bin", "Release");
         if (Directory.Exists(releaseDir))
         {
-            var releaseExe = Directory
-                .EnumerateFiles(releaseDir, "MyWebView2Browser.exe", SearchOption.AllDirectories)
-                .OrderByDescending(File.GetLastWriteTime)
-                .FirstOrDefault();
+            var releaseExe = FindLatestExecutable(releaseDir);
             if (!string.IsNullOrWhiteSpace(releaseExe)) return releaseExe;
         }
 
         var debugDir = Path.Combine(projectDirectory, "bin", "Debug");
         if (!Directory.Exists(debugDir)) return null;
 
-        return Directory
-            .EnumerateFiles(debugDir, "MyWebView2Browser.exe", SearchOption.AllDirectories)
-            .OrderByDescending(File.GetLastWriteTime)
-            .FirstOrDefault();
+        return FindLatestExecutable(debugDir);
     }
 
     /// <summary>
@@ -1349,23 +1374,26 @@ public partial class MainForm
         try
         {
             var waitTask = proc.WaitForExitAsync();
-            var timeoutTask = System.Threading.Tasks.Task.Delay(timeoutMs);
-            var finishedTask = await System.Threading.Tasks.Task.WhenAny(waitTask, timeoutTask);
-
-            if (finishedTask == timeoutTask)
+            if (timeoutMs > 0)
             {
-                timedOut = true;
-                try
-                {
-                    if (!proc.HasExited)
-                        proc.Kill(entireProcessTree: true);
-                }
-                catch
-                {
-                    // 忽略超时杀进程时的清理异常
-                }
+                var timeoutTask = System.Threading.Tasks.Task.Delay(timeoutMs);
+                var finishedTask = await System.Threading.Tasks.Task.WhenAny(waitTask, timeoutTask);
 
-                return (-1, stdOut.ToString(), stdErr.ToString(), true, false);
+                if (finishedTask == timeoutTask)
+                {
+                    timedOut = true;
+                    try
+                    {
+                        if (!proc.HasExited)
+                            proc.Kill(entireProcessTree: true);
+                    }
+                    catch
+                    {
+                        // 忽略超时杀进程时的清理异常
+                    }
+
+                    return (-1, stdOut.ToString(), stdErr.ToString(), true, false);
+                }
             }
 
             await waitTask;
@@ -1396,6 +1424,12 @@ public partial class MainForm
             DetachActiveRunProcess(proc, timedOut, stoppedByUser, exitCode);
         }
     }
+
+    /// <summary>
+    /// 根据用户是否启用超时保护，返回实际使用的超时时间；未启用时返回 0 表示不限时。
+    /// </summary>
+    private int GetConfiguredCommandTimeoutMs(int defaultTimeoutMs)
+        => _chkEnableCommandTimeout.Checked ? defaultTimeoutMs : 0;
 
 
 
@@ -1461,7 +1495,7 @@ public partial class MainForm
         if (savedBuildCommand != null)
         {
             AppendRunOutput("📌 已使用右侧置顶的默认编译命令。\n");
-            return await ExecuteSavedCommandToRunOutputAsync(savedBuildCommand, "编译", 60_000);
+            return await ExecuteSavedCommandToRunOutputAsync(savedBuildCommand, "编译", GetConfiguredCommandTimeoutMs(60_000));
         }
 
         // 自动探测 SConstruct
@@ -1501,7 +1535,7 @@ public partial class MainForm
 
         var buildResult = await RunProcessCaptureAsync(
             buildInfo,
-            timeoutMs: 60_000,
+            timeoutMs: GetConfiguredCommandTimeoutMs(60_000),
             onStdOutLine: line => AppendRunOutput(line + "\n"),
             onStdErrLine: line => AppendRunOutput(line + "\n", Color.IndianRed),
             displayName: useScons ? "编译: scons" : $"编译: {buildInfo.FileName}");
@@ -1544,7 +1578,7 @@ public partial class MainForm
         if (savedRunCommand != null)
         {
             AppendRunOutput("📌 已使用右侧置顶的默认运行命令。\n");
-            return await ExecuteSavedCommandToRunOutputAsync(savedRunCommand, "运行", 30_000);
+            return await ExecuteSavedCommandToRunOutputAsync(savedRunCommand, "运行", GetConfiguredCommandTimeoutMs(30_000));
         }
 
         if (!File.Exists(exePath))
@@ -1567,7 +1601,7 @@ public partial class MainForm
 
         var runResult = await RunProcessCaptureAsync(
             runInfo,
-            timeoutMs: 30_000,
+            timeoutMs: GetConfiguredCommandTimeoutMs(30_000),
             onStdOutLine: line => AppendRunOutput(line + "\n"),
             onStdErrLine: line => AppendRunOutput(line + "\n", Color.IndianRed),
             displayName: $"运行: {Path.GetFileName(exePath)}");

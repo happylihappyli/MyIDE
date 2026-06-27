@@ -65,7 +65,7 @@ class BuildLauncherUI:
                 project_dir=mychrome_dir,
                 project_file=mychrome_dir / "MyWebView2Browser.csproj",
                 framework="net9.0-windows",
-                exe_name="MyWebView2Browser.exe",
+                exe_name="MyChrome.exe",
             ),
         }
 

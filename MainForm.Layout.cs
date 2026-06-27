@@ -21,11 +21,13 @@ public partial class MainForm
     {
         var fileMenu = new ToolStripMenuItem("文件(&F)");
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("新建文本文件(&N)...", null, (_, _) => CreateNewTextFile()) { ShortcutKeys = Keys.Control | Keys.N });
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("新建项目目录(&P)...", null, (_, _) => CreateNewProjectDirectory()) { ShortcutKeys = Keys.Control | Keys.Shift | Keys.N });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("打开目录(&O)...", null, (_, _) => BtnOpen_Click()) { ShortcutKeys = Keys.Control | Keys.O });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("保存(&S)", null, (_, _) => SaveCurrentEditor()) { ShortcutKeys = Keys.Control | Keys.S });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("另存为(&A)...", null, (_, _) => SaveCurrentEditorAs()) { ShortcutKeys = Keys.Control | Keys.Shift | Keys.S });
         fileMenu.DropDownItems.Add(_menuRecent);
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("刷新(&R)", null, (_, _) => RefreshProjectTree()) { ShortcutKeys = Keys.F5 });
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("归档所有 .bak", null, (_, _) => ArchiveAllProjectBakFiles()));
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("设置(&T)...", null, (_, _) => ShowSettings()));
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("退出(&X)", null, (_, _) => Close()));
@@ -45,6 +47,7 @@ public partial class MainForm
 
     private void BuildToolbar()
     {
+        var btnNewProject = MakeToolButton("🗂 新建项目", (_, _) => CreateNewProjectDirectory());
         var btnOpen = MakeToolButton("📂 打开目录", (_, _) => BtnOpen_Click());
         var btnSave = MakeToolButton("💾 保存", (_, _) => SaveCurrentEditor());
         var btnMyChrome = MakeToolButton("🌐 启动 MyChrome", async (_, _) => await LaunchMyChromeAsync());
@@ -60,7 +63,7 @@ public partial class MainForm
 
         _toolbar.Items.AddRange(new ToolStripItem[]
         {
-            btnOpen, btnSave, btnMyChrome, btnNewSession, btnCloseEditor, new ToolStripSeparator(),
+            btnNewProject, btnOpen, btnSave, btnMyChrome, btnNewSession, btnCloseEditor, new ToolStripSeparator(),
             btnGen, btnCopy, btnPasteJson, new ToolStripSeparator(),
             btnPreview, btnApply, btnUndo, new ToolStripSeparator(),
             new ToolStripControlHost(_chkIncludeAll) { BackColor = BgPanel },
@@ -95,8 +98,9 @@ public partial class MainForm
         var leftTopPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = BgPanel };
         leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var treeHeaderPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, BackColor = BgHeader };
+        var treeHeaderPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, BackColor = BgHeader };
         treeHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        treeHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
         treeHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
         treeHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
         treeHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
@@ -138,6 +142,7 @@ public partial class MainForm
         };
         btnRefreshTree.FlatAppearance.BorderSize = 0;
         btnRefreshTree.Click += (_, _) => RefreshProjectTree();
+        var btnArchiveBakTree = createTreeActionButton("🗃", "归档所有 .bak 文件", (_, _) => ArchiveAllProjectBakFiles());
         _tree.Dock = DockStyle.Fill;
         _tree.BackColor = BgPanel;
         _tree.ForeColor = FgText;
@@ -158,6 +163,7 @@ public partial class MainForm
         _treeMenu.Items.Add("新建文本文件", null, (_, _) => CreateNewTextFile());
         _treeMenu.Items.Add("新建目录", null, (_, _) => CreateNewDirectory());
         _treeMenu.Items.Add("刷新", null, (_, _) => RefreshProjectTree());
+        _treeMenu.Items.Add("归档所有 .bak", null, (_, _) => ArchiveAllProjectBakFiles());
         _treeMenu.Items.Add("打开当前目录", null, (_, _) => OpenDirectoryInExplorer());
         _treeMenu.Items.Add("在集成终端打开", null, (_, _) => OpenDirectoryInTerminal());
         _treeMenu.Items.Add(new ToolStripSeparator());
@@ -174,6 +180,7 @@ public partial class MainForm
         treeHeaderPanel.Controls.Add(btnNewFileTree, 1, 0);
         treeHeaderPanel.Controls.Add(btnNewFolderTree, 2, 0);
         treeHeaderPanel.Controls.Add(btnRefreshTree, 3, 0);
+        treeHeaderPanel.Controls.Add(btnArchiveBakTree, 4, 0);
         leftTopPanel.Controls.Add(treeHeaderPanel, 0, 0);
         leftTopPanel.Controls.Add(_tree, 0, 1);
         leftSplit.Panel1.Controls.Add(leftTopPanel);
@@ -371,6 +378,7 @@ public partial class MainForm
         runButtonPanel.Controls.Add(_btnStopRunOutput);
         runButtonPanel.Controls.Add(btnCopyOutput);
         runButtonPanel.Controls.Add(_btnClearRunOutput);
+        runButtonPanel.Controls.Add(_chkEnableCommandTimeout);
         runButtonPanel.Controls.Add(_chkAutoScrollOutput);
         runButtonPanel.Controls.Add(_chkAutoScrollLog);
         runToolbar.Controls.Add(runInfoPanel, 0, 0);

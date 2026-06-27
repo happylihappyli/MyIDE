@@ -15,6 +15,9 @@ namespace MyIDE.Forms;
 /// </summary>
 public class AiCommandBatchForm : Form
 {
+    private const int CommandListPreferredWidth = 230;
+    private const int CommandListMinWidth = 220;
+    private const int CommandDetailMinWidth = 720;
     private readonly string _projectRoot;
     private readonly List<AiCommand> _commands;
     private readonly Action<IReadOnlyList<AiCommand>>? _saveSelectedCallback;
@@ -36,8 +39,9 @@ public class AiCommandBatchForm : Form
         _saveSelectedCallback = saveSelectedCallback;
 
         Text = $"AI 命令执行（{_commands.Count} 条）";
-        Width = 1100;
-        Height = 760;
+        Width = 1280;
+        Height = 820;
+        MinimumSize = new System.Drawing.Size(1080, 720);
         StartPosition = FormStartPosition.CenterParent;
 
         BuildLayout();
@@ -53,7 +57,8 @@ public class AiCommandBatchForm : Form
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 250
+            FixedPanel = FixedPanel.Panel1,
+            SplitterWidth = 6
         };
         Controls.Add(split);
 
@@ -112,7 +117,7 @@ public class AiCommandBatchForm : Form
             RowCount = 4
         };
         rightPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        rightPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
+        rightPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 240));
         rightPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         rightPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         split.Panel2.Controls.Add(rightPanel);
@@ -146,6 +151,40 @@ public class AiCommandBatchForm : Form
         _txtOutput.ScrollBars = ScrollBars.Both;
         _txtOutput.Font = new System.Drawing.Font("Cascadia Mono", 10);
         rightPanel.Controls.Add(_txtOutput, 0, 3);
+
+        void applySplitLayout()
+        {
+            if (split.IsDisposed)
+            {
+                return;
+            }
+
+            var availableWidth = split.Width - split.SplitterWidth;
+            if (availableWidth <= 0)
+            {
+                return;
+            }
+
+            // 先临时清空最小宽度约束，避免在约束尚未匹配当前宽度时触发 WinForms 的分栏越界异常。
+            split.Panel1MinSize = 0;
+            split.Panel2MinSize = 0;
+
+            var effectivePanel1Min = Math.Min(CommandListMinWidth, Math.Max(120, availableWidth / 4));
+            var effectivePanel2Min = Math.Min(CommandDetailMinWidth, Math.Max(160, availableWidth - effectivePanel1Min));
+            if (effectivePanel1Min + effectivePanel2Min > availableWidth)
+            {
+                effectivePanel2Min = Math.Max(1, availableWidth - effectivePanel1Min);
+            }
+
+            var minDistance = effectivePanel1Min;
+            var maxDistance = Math.Max(minDistance, availableWidth - effectivePanel2Min);
+            split.SplitterDistance = Math.Min(Math.Max(CommandListPreferredWidth, minDistance), maxDistance);
+            split.Panel1MinSize = effectivePanel1Min;
+            split.Panel2MinSize = effectivePanel2Min;
+        }
+
+        Shown += (_, _) => applySplitLayout();
+        split.SizeChanged += (_, _) => applySplitLayout();
     }
 
     /// <summary>

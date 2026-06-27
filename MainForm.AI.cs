@@ -104,7 +104,7 @@ public partial class MainForm
     }
 
     /// <summary>
-    /// 把当前计划内容写入设置，保证下次打开时自动恢复。
+    /// 把当前计划内容写入设置，保证下次打开时自动恢复；仅在显式要求时才加入计划历史。
     /// </summary>
     private void SaveCurrentPlanText(bool forceHistory = false)
     {
@@ -116,7 +116,10 @@ public partial class MainForm
             _settings.Save();
         }
 
-        SaveCurrentPlanToHistory(force: forceHistory);
+        if (forceHistory)
+        {
+            SaveCurrentPlanToHistory(force: true);
+        }
     }
 
     /// <summary>
@@ -156,7 +159,7 @@ public partial class MainForm
             ForeColor = FgMuted,
             BackColor = BgDark,
             Padding = new Padding(8, 0, 0, 0),
-            Text = "左侧可粘贴或直接从 MyChrome 读取最新回复；右侧可查看解析摘要、命令区快捷提示，并从最近 3 条历史一键带入。快捷键：Ctrl+Enter 应用，Ctrl+Shift+Enter 预览，Ctrl+M 读取，Ctrl+Delete 清空。"
+            Text = "左侧默认保持空白，可直接粘贴或从 MyChrome 读取最新回复；如需恢复上次暂存内容，可点“读取上次内容”。右侧可查看解析摘要、命令区快捷提示，并从最近 3 条历史一键带入。快捷键：Ctrl+Enter 应用，Ctrl+Shift+Enter 预览，Ctrl+M 读取，Ctrl+Delete 清空。"
         };
         layout.Controls.Add(tipLabel, 0, 0);
 
@@ -200,7 +203,7 @@ public partial class MainForm
             BorderStyle = BorderStyle.FixedSingle,
             BackColor = BgDark,
             ForeColor = FgText,
-            Text = _txtAi.Text
+            Text = ""
         };
         var leftPanel = new TableLayoutPanel
         {
@@ -310,6 +313,8 @@ public partial class MainForm
         btnUseLatest.Width = 136;
         var btnInsertCommandsTemplate = makeButton("仅 commands 模板", Color.FromArgb(79, 97, 40));
         btnInsertCommandsTemplate.Width = 136;
+        var btnLoadLastBuffer = makeButton("读取上次内容", Color.FromArgb(96, 72, 138));
+        btnLoadLastBuffer.Width = 128;
         var btnReadFromMyChrome = makeButton("从 MyChrome 读取", Color.FromArgb(0, 122, 204));
         btnReadFromMyChrome.Width = 148;
         var btnClearEditor = makeButton("清空左侧", Color.FromArgb(90, 45, 45));
@@ -363,6 +368,21 @@ public partial class MainForm
             tb.SelectionLength = 0;
             tb.Focus();
             Log("✔ 已插入仅命令的 Patch 协议模板。");
+        }
+
+        void loadLastBuffer()
+        {
+            if (string.IsNullOrWhiteSpace(_txtAi.Text))
+            {
+                Warn("当前没有上次暂存的 AI 返回内容");
+                return;
+            }
+
+            tb.Text = _txtAi.Text;
+            tb.SelectionStart = tb.TextLength;
+            tb.SelectionLength = 0;
+            tb.Focus();
+            Log("✔ 已读取上次暂存的 AI 返回内容。");
         }
 
         async Task readJsonFromMyChromeAsync()
@@ -453,6 +473,7 @@ public partial class MainForm
         btnUseRecent.Click += (_, _) => importRecent(getSelectedRecent());
         btnUseLatest.Click += (_, _) => importRecent(recentHistory.FirstOrDefault());
         btnInsertCommandsTemplate.Click += (_, _) => insertCommandsTemplate();
+        btnLoadLastBuffer.Click += (_, _) => loadLastBuffer();
         btnReadFromMyChrome.Click += async (_, _) => await readJsonFromMyChromeAsync();
         btnClearEditor.Click += (_, _) => clearEditorText();
 
@@ -468,6 +489,7 @@ public partial class MainForm
         }
 
         quickActionPanel.Controls.Add(btnInsertCommandsTemplate);
+        quickActionPanel.Controls.Add(btnLoadLastBuffer);
         quickActionPanel.Controls.Add(btnReadFromMyChrome);
         quickActionPanel.Controls.Add(btnClearEditor);
         leftPanel.Controls.Add(quickActionPanel, 0, 0);

@@ -58,6 +58,11 @@ public class ChangeApplier
             return ParsePatchResponse(rawText);
         }
 
+        if (LooksLikePromptTemplate(rawText))
+        {
+            throw new InvalidDataException("当前内容更像发给 AI 的提示词，不是 AI 返回的 Patch/JSON。请把 AI 真正返回的补丁或命令内容粘贴进来后再应用。");
+        }
+
         return ParseLegacyJson(rawText);
     }
 
@@ -89,6 +94,8 @@ public class ChangeApplier
         int last = text.LastIndexOf('}');
         if (first >= 0 && last > first)
             text = text.Substring(first, last - first + 1);
+        else
+            throw new InvalidDataException("未识别到可解析的 JSON 主体；当前内容可能是提示词、源码片段或普通说明文字。");
 
         var options = new JsonSerializerOptions
         {
@@ -96,8 +103,16 @@ public class ChangeApplier
             ReadCommentHandling = JsonCommentHandling.Skip,
             AllowTrailingCommas = true,
         };
-        var plan = JsonSerializer.Deserialize<ChangePlan>(text, options)
-            ?? throw new InvalidDataException("JSON 解析结果为空");
+        ChangePlan plan;
+        try
+        {
+            plan = JsonSerializer.Deserialize<ChangePlan>(text, options)
+                ?? throw new InvalidDataException("JSON 解析结果为空");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException($"未识别到合法的 AI 返回 JSON；当前内容可能混入了提示词或源码片段。原始错误：{ex.Message}", ex);
+        }
             
         PostProcessParsedPlan(plan);
         return plan;
@@ -116,6 +131,21 @@ public class ChangeApplier
                text.Contains("【补丁】", StringComparison.Ordinal) ||
                text.Contains("*** Add File:", StringComparison.Ordinal) ||
                text.Contains("*** Update File:", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 判断当前文本是否更像发给 AI 的提示词模板，而不是 AI 实际返回结果。
+    /// </summary>
+    private static bool LooksLikePromptTemplate(string rawText)
+    {
+        if (string.IsNullOrWhiteSpace(rawText)) return false;
+
+        var text = rawText.Trim();
+        return text.StartsWith("你是一个代码修改助手", StringComparison.Ordinal) ||
+               text.Contains("【任务说明】", StringComparison.Ordinal) ||
+               text.Contains("【项目环境与约束】", StringComparison.Ordinal) ||
+               text.Contains("【当前关注的文件】", StringComparison.Ordinal) ||
+               text.Contains("【本次优先处理的文件】", StringComparison.Ordinal);
     }
 
     /// <summary>

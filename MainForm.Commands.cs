@@ -326,7 +326,7 @@ public partial class MainForm
             return;
         }
 
-        await ExecuteSavedCommandToRunOutputAsync(command, "手动执行", 60_000);
+        await ExecuteSavedCommandToRunOutputAsync(command, "手动执行", GetConfiguredCommandTimeoutMs(60_000));
     }
 
     private async System.Threading.Tasks.Task RunTerminalCommandAsync(string commandText)

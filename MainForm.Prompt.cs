@@ -122,16 +122,15 @@ public partial class MainForm
             btnAddProtocol.Enabled = false;
             Log("✔ 已将完整 Patch 协议说明加入当前提示词窗口，可直接复制给 AI。");
         };
-        btnCopy.Click += (_, _) =>
+        btnCopy.Click += async (_, _) =>
         {
             try
             {
                 currentPrompt = tb.Text ?? "";
-                Clipboard.SetText(currentPrompt);
                 _lastGeneratedPrompt = currentPrompt;
                 btnCopy.Text = "✅ 已复制！";
-                Log("✔ 已复制提示词，请粘贴给 AI；拿到 Patch/命令返回后粘回当前页并点“应用”");
-                ShowTransientStatus("● 已复制提示词，可直接发给 AI", Success);
+                dlg.Close();
+                await CopyPromptTextAsync(currentPrompt, files);
             }
             catch (Exception ex)
             {
@@ -160,7 +159,7 @@ public partial class MainForm
         }
         var prompt = _lastGeneratedPrompt;
         var files = GetCheckedFiles();
-        SaveCurrentPlanText(forceHistory: true);
+        SaveCurrentPlanText();
         if (string.IsNullOrWhiteSpace(prompt))
         {
             prompt = GeneratePromptText(out files);
@@ -169,28 +168,58 @@ public partial class MainForm
 
         try
         {
-            Clipboard.SetText(prompt);
-            Log($"✔ 已复制提示词到剪贴板（{prompt.Length} 字符，带入了 {files.Count} 个文件）");
-            var browserResult = await TrySendToAiBrowserAsync(prompt, autoSend: true, source: "prompt");
-            if (browserResult.Ok)
-            {
-                UpdateAiBrowserSendStatus(browserResult, prompt);
-            }
-            else
-            {
-                UpdateAiBrowserSendStatus(browserResult, prompt);
-                Log("· AI 浏览器未连接或页面未就绪，仍可使用剪贴板手工粘贴。");
-            }
-            Log("下一步：把提示词发给 AI，然后将返回的 Patch/命令内容粘贴");
-            _lblStatus.Text = "● 等待粘贴 AI 返回内容";
-            _lblStatus.ForeColor = Accent;
-            ShowTransientStatus("● 已复制提示词，可直接发给 AI", Success);
+            await CopyPromptTextAsync(prompt, files);
         }
         catch (Exception ex)
         {
             Log($"✖ 复制提示词失败：{ex.Message}");
             ShowTransientStatus("● 复制提示词失败，请看日志", Error);
         }
+    }
+
+    /// <summary>
+    /// 统一执行提示词复制、推送到 MyChrome，并在完成后自动打开 AI 返回内容粘贴窗口。
+    /// </summary>
+    private async Task CopyPromptTextAsync(string prompt, List<string> files)
+    {
+        Clipboard.SetText(prompt);
+        Log($"✔ 已复制提示词到剪贴板（{prompt.Length} 字符，带入了 {files.Count} 个文件）");
+        var browserResult = await TrySendToAiBrowserAsync(prompt, autoSend: false, source: "prompt");
+        if (browserResult.Ok)
+        {
+            UpdateAiBrowserSendStatus(browserResult, prompt);
+        }
+        else
+        {
+            UpdateAiBrowserSendStatus(browserResult, prompt);
+            Log("· AI 浏览器未连接或页面未就绪，仍可使用剪贴板手工粘贴。");
+        }
+
+        Log("下一步：等待 MyChrome 倒计时自动发送，然后将返回的 Patch/命令内容粘贴。");
+        _lblStatus.Text = "● 等待粘贴 AI 返回内容";
+        _lblStatus.ForeColor = Accent;
+        ShowTransientStatus(
+            browserResult.Ok
+                ? "● 已复制提示词，并推送到 MyChrome"
+                : "● 已复制提示词，可手工粘贴到 AI",
+            Success);
+        OpenAiJsonInputDialogAfterPromptCopy();
+    }
+
+    /// <summary>
+    /// 复制提示词后自动打开 AI 返回内容粘贴窗口，方便用户直接等待或粘贴返回结果。
+    /// </summary>
+    private void OpenAiJsonInputDialogAfterPromptCopy()
+    {
+        if (IsDisposed) return;
+
+        BeginInvoke(new Action(() =>
+        {
+            if (IsDisposed) return;
+
+            Log("✔ 已自动打开“粘贴返回内容”窗口，可直接粘贴 AI 返回的 Patch/命令内容。");
+            HandleAiJsonDialogAction(ShowAiJsonInputDialog());
+        }));
     }
 
     /// <summary>

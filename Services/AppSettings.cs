@@ -21,6 +21,7 @@ public class AppSettings
     public int LeftPanelWidth { get; set; } = 280;
     public int RightPanelWidth { get; set; } = 520;
     public int AiJsonDialogSplitterDistance { get; set; } = 700;
+    public bool EnableCommandTimeouts { get; set; }
     public bool IsSavedPlanCollapsed { get; set; }
     public bool IsSavedJsonCollapsed { get; set; }
     public bool IsSavedCommandsCollapsed { get; set; }
